@@ -1,4 +1,4 @@
-import { git } from "./git.js";
+import { git, boundedInteger, parseNumstat } from "./git.js";
 import { parsePRNumberFromMessage } from "./github.js";
 import type { RecentWorkResult } from "./types.js";
 
@@ -9,56 +9,27 @@ export async function recentWork(opts: {
   limit?: number;
 }): Promise<RecentWorkResult> {
   const since = opts.since ?? "7 days ago";
-  const limit = opts.limit ?? 100;
-
-  let author = opts.author;
-  if (!author) {
-    try {
-      author = (await git(["config", "user.name"], opts.cwd)).trim();
-    } catch {
-      author = "";
-    }
-  }
-
-  const args = ["log", `--author=${author}`, `--since=${since}`, "-n", String(limit), "--pretty=format:%H|%aI|%s"];
-  const logOut = await git(args, opts.cwd);
-  const commits = logOut
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => {
-      const [sha, date, ...rest] = line.split("|");
-      const subject = rest.join("|");
-      const pr = parsePRNumberFromMessage(subject);
-      return { sha, date, subject, pr: pr ?? undefined };
-    });
-
-  let insertions = 0;
-  let deletions = 0;
+  const limit = boundedInteger(opts.limit, 100, 1, 1000);
+  const author = opts.author ?? (await git(["config", "user.name"], opts.cwd)).trim();
+  if (!author) throw new Error("Provide author or configure git user.name");
+  const output = await git(["log", `--author=${author}`, `--since=${since}`, "-n", String(limit), "--format=%x00%x00%x00%H%x00%aI%x00%s", "--numstat", "-z"], opts.cwd);
   const filesSet = new Set<string>();
-
-  if (commits.length) {
-    const shortStat = await git(
-      ["log", `--author=${author}`, `--since=${since}`, "--pretty=format:", "--numstat"],
-      opts.cwd
-    );
-    for (const line of shortStat.split("\n")) {
-      const m = line.match(/^(\d+|-)\t(\d+|-)\t(.+)$/);
-      if (!m) continue;
-      const ins = m[1] === "-" ? 0 : parseInt(m[1], 10);
-      const del = m[2] === "-" ? 0 : parseInt(m[2], 10);
-      insertions += ins;
-      deletions += del;
-      filesSet.add(m[3]);
-    }
-  }
-
+  const commits = output.split(/\0{3,}/).filter(Boolean).map((record) => {
+    const [sha, date, subject = "", ...stats] = record.split("\0");
+    const files = parseNumstat(stats.join("\0"));
+    for (const file of files) filesSet.add(file.path);
+    return {
+      sha, date, subject,
+      pr: parsePRNumberFromMessage(subject) ?? undefined,
+      files: files.length,
+      insertions: files.reduce((sum, file) => sum + file.insertions, 0),
+      deletions: files.reduce((sum, file) => sum + file.deletions, 0),
+    };
+  });
   return {
-    author,
-    since,
-    commit_count: commits.length,
-    files_touched: filesSet.size,
-    insertions,
-    deletions,
+    author, since, commit_count: commits.length, files_touched: filesSet.size,
+    insertions: commits.reduce((sum, commit) => sum + commit.insertions, 0),
+    deletions: commits.reduce((sum, commit) => sum + commit.deletions, 0),
     commits,
   };
 }

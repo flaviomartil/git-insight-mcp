@@ -12,10 +12,9 @@ import { coChange } from "./co-change.js";
 import { branchHygiene } from "./branch-hygiene.js";
 import { recentWork } from "./recent-work.js";
 import { commitContext } from "./commit-context.js";
-import { getOctokit } from "./github.js";
 
 const server = new Server(
-  { name: "git-insight-mcp", version: "0.1.3" },
+  { name: "git-insight-mcp", version: "0.1.3-harness.1" },
   { capabilities: { tools: {} } }
 );
 
@@ -68,18 +67,18 @@ const TOOLS = [
             },
           },
         },
-        primary_owner: { type: "string", description: "Name of the author with the most lines." },
+        primary_owner: { type: ["string", "null"], description: "Name of the author with the most lines, or null for an empty file." },
       },
     },
   },
   {
     name: "introducing_pr",
     description:
-      "Read-only. Find the pull request that introduced a line or a commit. " +
+      "Read-only. Find the pull request associated with a commit or the last change to a line. " +
       "First resolves the line to a commit via `git blame`, then reads the local merge-commit message; " +
-      "if that has no PR reference and `GH_TOKEN`/`GITHUB_TOKEN` is set, falls back to the GitHub REST API. " +
+      "if that has no PR reference, falls back to GitHub with a token or existing gh authentication. " +
       "Without a token the local path still works; `pr` is `null` when nothing can be resolved (e.g. rebase-merged with no PR ref). " +
-      "Provide either `commit`, or both `file` and `line`. May make one outbound GitHub API call (subject to the 5000/h authed rate limit).",
+      "Local message links support GitHub, Bitbucket and Azure DevOps. Provide either `commit`, or both `file` and `line`. GitHub enrichment may make several API calls.",
     annotations: { title: "Introducing PR", ...MAY_HIT_GITHUB },
     inputSchema: {
       type: "object",
@@ -88,6 +87,7 @@ const TOOLS = [
         file: { type: "string", description: "File path relative to the repo root. Requires `line`." },
         line: { type: "number", description: "1-based line number in `file` to blame back to its introducing commit." },
         commit: { type: "string", description: "Commit SHA to look up directly. Use this instead of `file`/`line`." },
+        remote_name: { type: "string", description: "Explicit remote name; otherwise prefer origin when supported, then another supported remote." },
       },
       additionalProperties: false,
     },
@@ -98,7 +98,7 @@ const TOOLS = [
         commit_message: { type: "string" },
         commit_date: { type: "string" },
         author: { type: "string" },
-        source: { type: "string", description: "How the PR was resolved: `merge-message`, `github-api`, or `not-found`." },
+        source: { type: "string", enum: ["merge-commit-parse", "github-api", "not-found"] },
         pr: { type: ["object", "null"], description: "PR details when resolved, else null." },
       },
     },
@@ -109,16 +109,16 @@ const TOOLS = [
       "Read-only. Files that historically change together with the input file — answers \"if I edit X, what else should I check?\". " +
       "Mines up to `window` recent commits that touch `file`, counts how often each other file appears alongside it, and returns those above `threshold`, " +
       "with the co-occurrence count and ratio (count / commits-touching-file), capped at `limit`. " +
-      "Pure local log mining; no network. Cost is O(window × files-per-commit) — keep `window` ≤ a few thousand on large repos.",
+      "Pure local log mining in one batched git log; no network. Window is capped at 5000 commits. Correlation is a hint, not proof of dependency.",
     annotations: { title: "Co-change suggestions", ...LOCAL_ONLY },
     inputSchema: {
       type: "object",
       properties: {
         cwd: { type: "string", description: "Path inside the target git repo. Defaults to the server's current working directory." },
         file: { type: "string", description: "File path relative to the repo root to find co-changing files for." },
-        window: { type: "number", description: "How many recent commits touching `file` to mine. Default 1000." },
-        threshold: { type: "number", description: "Minimum co-occurrence count for a file to be included. Default 3." },
-        limit: { type: "number", description: "Maximum number of co-changing files to return, highest count first. Default 20." },
+        window: { type: "integer", minimum: 1, maximum: 5000, description: "Recent commits touching file. Default 1000." },
+        threshold: { type: "integer", minimum: 1, maximum: 5000, description: "Minimum co-occurrence count. Default 3." },
+        limit: { type: "integer", minimum: 1, maximum: 1000, description: "Maximum results. Default 20." },
       },
       required: ["file"],
       additionalProperties: false,
@@ -153,8 +153,10 @@ const TOOLS = [
       type: "object",
       properties: {
         cwd: { type: "string", description: "Path inside the target git repo. Defaults to the server's current working directory." },
-        stale_days: { type: "number", description: "A branch with no commit newer than this many days is flagged `stale`. Default 30." },
-        remote: { type: "boolean", description: "Inspect remote (`origin`) branches instead of local branches. Default false." },
+        stale_days: { type: "integer", minimum: 0, maximum: 36500, description: "Stale age in days. Default 30." },
+        remote: { type: "boolean", description: "Inspect remote branches instead of local branches. Default false." },
+        remote_name: { type: "string", description: "Remote to inspect. Default origin." },
+        base: { type: "string", description: "Comparison branch. Defaults to the selected remote HEAD or a known local default." },
       },
       additionalProperties: false,
     },
@@ -194,7 +196,7 @@ const TOOLS = [
         cwd: { type: "string", description: "Path inside the target git repo. Defaults to the server's current working directory." },
         author: { type: "string", description: "Author name or email substring (passed to `git log --author`). Defaults to `git config user.name`." },
         since: { type: "string", description: "Any git date expression, e.g. `7 days ago`, `2026-05-01`, `last monday`. Default `7 days ago`." },
-        limit: { type: "number", description: "Maximum number of commits to return, newest first. Default 100." },
+        limit: { type: "integer", minimum: 1, maximum: 1000, description: "Maximum commits; totals use the same limited window. Default 100." },
       },
       additionalProperties: false,
     },
@@ -204,6 +206,9 @@ const TOOLS = [
         author: { type: "string" },
         since: { type: "string" },
         commit_count: { type: "number" },
+        files_touched: { type: "number" },
+        insertions: { type: "number" },
+        deletions: { type: "number" },
         commits: {
           type: "array",
           items: {
@@ -225,14 +230,15 @@ const TOOLS = [
     name: "commit_context",
     description:
       "Read-only. Everything about one commit in a single call: subject, body, changed files with per-file insertions/deletions, totals, " +
-      "the linked PR (parsed from the merge message, or via the GitHub API when `GH_TOKEN`/`GITHUB_TOKEN` is set), and issue numbers referenced in the message (`Fixes #N`, `Closes #N`). " +
-      "Errors if the SHA does not resolve in `cwd`. May make one outbound GitHub API call for PR enrichment.",
+      "the linked PR (local GitHub/Bitbucket/Azure message reference, or GitHub API with token/gh authentication), and closing issue references. " +
+      "Errors if the revision does not resolve in cwd. GitHub enrichment may make several API calls.",
     annotations: { title: "Commit context", ...MAY_HIT_GITHUB },
     inputSchema: {
       type: "object",
       properties: {
         cwd: { type: "string", description: "Path inside the target git repo. Defaults to the server's current working directory." },
         sha: { type: "string", description: "Commit SHA (full or abbreviated) or any revision `git` accepts, e.g. `HEAD`, `HEAD~3`, a tag." },
+        remote_name: { type: "string", description: "Explicit remote name for PR lookup." },
       },
       required: ["sha"],
       additionalProperties: false,
@@ -263,7 +269,16 @@ const TOOLS = [
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
 
-const Cwd = z.string().optional();
+const Text = z.string().min(1).refine((value) => !value.includes("\0"), "NUL is not allowed");
+const Cwd = Text.optional();
+const Inputs: Record<string, z.ZodTypeAny> = {
+  who_touched: z.object({ cwd: Cwd, file: Text, line_start: z.number().int().positive().optional(), line_end: z.number().int().positive().optional(), function: z.string().optional() }).strict().refine((args) => (args.line_start === undefined) === (args.line_end === undefined), "Provide both line_start and line_end").refine((args) => args.line_start === undefined || args.line_end! >= args.line_start, "Invalid line range"),
+  introducing_pr: z.object({ cwd: Cwd, file: Text.optional(), line: z.number().int().positive().optional(), commit: Text.optional(), remote_name: Text.optional() }).strict().refine((args) => Boolean(args.commit || (args.file && args.line)), "Provide commit OR (file + line)"),
+  co_change: z.object({ cwd: Cwd, file: Text, window: z.number().int().min(1).max(5000).optional(), threshold: z.number().int().min(1).max(5000).optional(), limit: z.number().int().min(1).max(1000).optional() }).strict(),
+  branch_hygiene: z.object({ cwd: Cwd, stale_days: z.number().int().min(0).max(36500).optional(), remote: z.boolean().optional(), remote_name: Text.optional(), base: Text.optional() }).strict(),
+  recent_work: z.object({ cwd: Cwd, author: Text.optional(), since: Text.optional(), limit: z.number().int().min(1).max(1000).optional() }).strict(),
+  commit_context: z.object({ cwd: Cwd, sha: Text, remote_name: Text.optional() }).strict(),
+};
 
 async function resolveCwd(input?: string): Promise<string> {
   const candidate = input ?? process.cwd();
@@ -275,8 +290,9 @@ async function resolveCwd(input?: string): Promise<string> {
 
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
   const { name, arguments: args } = req.params;
-  const a: any = args ?? {};
   try {
+    if (!Inputs[name]) return err(`Unknown tool: ${name}`);
+    const a = Inputs[name].parse(args ?? {});
     const cwd = await resolveCwd(Cwd.parse(a.cwd));
     switch (name) {
       case "who_touched": {
@@ -293,6 +309,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           file: a.file,
           line: a.line ? Number(a.line) : undefined,
           commit: a.commit,
+          remoteName: a.remote_name,
         });
         return ok(result);
       }
@@ -310,8 +327,10 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case "branch_hygiene": {
         const result = await branchHygiene({
           cwd,
-          staleDays: a.stale_days ? Number(a.stale_days) : undefined,
+          staleDays: a.stale_days,
           remote: Boolean(a.remote),
+          remoteName: a.remote_name,
+          base: a.base,
         });
         return ok({ count: result.length, branches: result, default_branch_excluded: true });
       }
@@ -326,7 +345,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
       case "commit_context": {
         const sha = z.string().parse(a.sha);
-        const result = await commitContext({ cwd, sha });
+        const result = await commitContext({ cwd, sha, remoteName: a.remote_name });
         return ok(result);
       }
       default:
@@ -338,9 +357,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 });
 
 function ok(data: unknown) {
-  const meta = getOctokit() ? "" : "\n[note: GH_TOKEN/GITHUB_TOKEN not set — PR/issue lookups disabled]";
   return {
-    content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) + meta }],
+    content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
     structuredContent: data as Record<string, unknown>,
   };
 }

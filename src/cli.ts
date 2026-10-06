@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { parseArgs } from "node:util";
+import { getRepoRoot } from "./git.js";
 import { whoTouched } from "./who-touched.js";
 import { coChange } from "./co-change.js";
 import { branchHygiene } from "./branch-hygiene.js";
@@ -6,108 +8,91 @@ import { recentWork } from "./recent-work.js";
 import { commitContext } from "./commit-context.js";
 import { introducingPR } from "./introducing-pr.js";
 
-const args = process.argv.slice(2);
-const cmd = args[0];
-const cwd = process.cwd();
-
 async function main() {
-  switch (cmd) {
-    case undefined:
-    case "server":
-      await import("./index.js");
-      return;
-    case "who-touched": {
-      const file = args[1];
-      if (!file) return die("usage: git-insight-mcp who-touched <file>");
-      console.log(JSON.stringify(await whoTouched({ cwd, file }), null, 2));
-      return;
-    }
-    case "co-change": {
-      const file = args[1];
-      if (!file) return die("usage: git-insight-mcp co-change <file>");
-      console.log(JSON.stringify(await coChange({ cwd, file }), null, 2));
-      return;
-    }
-    case "branches": {
-      console.log(JSON.stringify(await branchHygiene({ cwd }), null, 2));
-      return;
-    }
-    case "recent": {
-      const author = args[1];
-      console.log(JSON.stringify(await recentWork({ cwd, author }), null, 2));
-      return;
-    }
-    case "commit": {
-      const sha = args[1];
-      if (!sha) return die("usage: git-insight-mcp commit <sha>");
-      console.log(JSON.stringify(await commitContext({ cwd, sha }), null, 2));
-      return;
-    }
-    case "intro-pr": {
-      const arg = args[1];
-      if (!arg) return die("usage: git-insight-mcp intro-pr <sha>  OR  intro-pr <file>:<line>");
-      if (arg.includes(":")) {
-        const [file, lineStr] = arg.split(":");
-        console.log(JSON.stringify(await introducingPR({ cwd, file, line: parseInt(lineStr, 10) }), null, 2));
-      } else {
-        console.log(JSON.stringify(await introducingPR({ cwd, commit: arg }), null, 2));
-      }
-      return;
-    }
-    case "--version":
-    case "-v": {
-      const { readFile } = await import("node:fs/promises");
-      const { fileURLToPath } = await import("node:url");
-      const { dirname, join } = await import("node:path");
-      const here = dirname(fileURLToPath(import.meta.url));
-      const pkg = JSON.parse(await readFile(join(here, "..", "package.json"), "utf8"));
-      console.log(pkg.version);
-      return;
-    }
-    case "--help":
-    case "-h":
-      help();
-      return;
-    default:
-      console.error(`Unknown command: ${cmd}`);
-      help();
-      process.exit(1);
+  const { values, positionals } = parseArgs({
+    allowPositionals: true,
+    options: {
+      cwd: { type: "string" }, window: { type: "string" }, threshold: { type: "string" },
+      limit: { type: "string" }, since: { type: "string" }, "stale-days": { type: "string" },
+      "remote-name": { type: "string" }, base: { type: "string" }, remote: { type: "boolean" },
+      "line-start": { type: "string" }, "line-end": { type: "string" },
+      compact: { type: "boolean" }, help: { type: "boolean", short: "h" }, version: { type: "boolean", short: "v" },
+    },
+  });
+  if (values.help) return help();
+  if (values.version) {
+    const { readFile } = await import("node:fs/promises");
+    console.log(JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")).version);
+    return;
   }
-}
-
-function die(msg: string) {
-  console.error(msg);
-  process.exit(1);
+  const [cmd = "server", arg, ...extra] = positionals;
+  if (extra.length) throw new Error("Too many positional arguments");
+  if (cmd === "server") {
+    if (values.cwd) process.chdir(values.cwd);
+    await import("./index.js");
+    return;
+  }
+  const cwd = await getRepoRoot(values.cwd ?? process.cwd());
+  const numeric = (value: string | undefined) => value === undefined ? undefined : Number(value);
+  const remoteName = values["remote-name"];
+  let result: unknown;
+  switch (cmd) {
+    case "who-touched": {
+      if (!arg) throw new Error("usage: git-insight-mcp who-touched <file>");
+      const start = numeric(values["line-start"]);
+      const end = numeric(values["line-end"]);
+      if ((start === undefined) !== (end === undefined)) throw new Error("Provide both --line-start and --line-end");
+      result = await whoTouched({ cwd, file: arg, lineRange: start === undefined ? undefined : [start, end!] });
+      break;
+    }
+    case "co-change":
+      if (!arg) throw new Error("usage: git-insight-mcp co-change <file>");
+      result = await coChange({ cwd, file: arg, window: numeric(values.window), threshold: numeric(values.threshold), limit: numeric(values.limit) });
+      break;
+    case "branches":
+      result = await branchHygiene({ cwd, remote: values.remote, remoteName, base: values.base, staleDays: numeric(values["stale-days"]) });
+      break;
+    case "recent":
+      result = await recentWork({ cwd, author: arg, since: values.since, limit: numeric(values.limit) });
+      break;
+    case "commit":
+      if (!arg) throw new Error("usage: git-insight-mcp commit <revision>");
+      result = await commitContext({ cwd, sha: arg, remoteName });
+      break;
+    case "intro-pr": {
+      if (!arg) throw new Error("usage: git-insight-mcp intro-pr <revision|file:line>");
+      const colon = arg.lastIndexOf(":");
+      result = await introducingPR(colon >= 0
+        ? { cwd, file: arg.slice(0, colon), line: Number(arg.slice(colon + 1)), remoteName }
+        : { cwd, commit: arg, remoteName });
+      break;
+    }
+    default:
+      throw new Error(`Unknown command: ${cmd}`);
+  }
+  console.log(JSON.stringify(result, null, values.compact ? undefined : 2));
 }
 
 function help() {
-  console.log(`git-insight-mcp — semantic git queries
+  console.log(`git-insight-mcp [server|who-touched|co-change|branches|recent|commit|intro-pr] [argument]
+--cwd <repo>                 Repository root or subdirectory
+--window <1..5000>           Co-change commit window (default 1000)
+--threshold <1..5000>        Minimum co-change count (default 3)
+--limit <1..1000>            Maximum results
+--line-start N --line-end N  Blame range
+--remote                    Inspect remote branches
+--remote-name <name>        Select the remote for branches or PRs
+--base <branch>             Branch comparison base
+--stale-days <0..36500>      Stale branch age (default 30)
+--since <git date>          Recent-work start (default 7 days ago)
+--compact                   Compact JSON
+--version | --help
 
-USAGE
-  git-insight-mcp [command] [args]
-
-COMMANDS
-  (none)                  Start MCP stdio server (for Claude/Cursor/etc)
-  server                  Same as above
-  who-touched <file>      Authorship breakdown by author
-  co-change <file>        Files most often changed together
-  branches                Branch hygiene report
-  recent [author]         Recent work (defaults to current user)
-  commit <sha>            Full commit context (subject, body, files, PR, issues)
-  intro-pr <sha>          PR that introduced a commit
-  intro-pr <file>:<line>  PR that introduced a line
-  --version               Print version
-  --help                  This help
-
-ENV
-  GH_TOKEN | GITHUB_TOKEN  GitHub token for PR/issue lookups (optional but recommended)
-
-INSTALL AS MCP
-  claude mcp add --scope user git-insight -- git-insight-mcp
-`);
+GitHub API: GH_TOKEN/GITHUB_TOKEN or existing gh authentication.
+Local PR references: GitHub, Bitbucket and Azure DevOps, without a token.`);
 }
 
-main().catch((e) => {
-  console.error(e?.message ?? e);
-  process.exit(1);
+main().catch((error) => {
+  console.error(error?.message ?? String(error));
+  process.exitCode = 1;
 });

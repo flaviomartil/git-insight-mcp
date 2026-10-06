@@ -1,56 +1,35 @@
-import { git, defaultBranch } from "./git.js";
+import { git, defaultBranch, boundedInteger, resolveRevision } from "./git.js";
 import type { BranchInfo } from "./types.js";
 
 export async function branchHygiene(opts: {
   cwd: string;
   staleDays?: number;
   remote?: boolean;
+  remoteName?: string;
+  base?: string;
 }): Promise<BranchInfo[]> {
-  const staleDays = opts.staleDays ?? 30;
-  const main = await defaultBranch(opts.cwd);
-  const refPrefix = opts.remote ? "refs/remotes/origin/" : "refs/heads/";
-
-  const out = await git(
-    ["for-each-ref", "--format=%(refname:short)|%(committerdate:iso8601)|%(authorname)", refPrefix],
-    opts.cwd
-  );
-
-  const branches: BranchInfo[] = [];
-  const now = Date.now();
-  for (const line of out.split("\n").filter(Boolean)) {
-    const [name, dateStr, author] = line.split("|");
-    if (!name) continue;
-    if (name === main || name === `origin/${main}` || name === "origin/HEAD") continue;
-
-    const baseRef = opts.remote ? `origin/${main}` : main;
-    let ahead = 0;
-    let behind = 0;
-    try {
-      const counts = await git(["rev-list", "--left-right", "--count", `${baseRef}...${name}`], opts.cwd);
-      const [b, a] = counts.trim().split("\t").map((n) => parseInt(n, 10) || 0);
-      ahead = a;
-      behind = b;
-    } catch {}
-
-    let merged = false;
-    try {
-      const mergedOut = await git(["branch", "--merged", baseRef], opts.cwd);
-      merged = mergedOut.split("\n").some((l) => l.replace(/^[* ]+/, "").trim() === name.replace(/^origin\//, ""));
-    } catch {}
-
-    const last = new Date(dateStr).getTime();
-    const stale = !isNaN(last) && now - last > staleDays * 86400000;
-
-    branches.push({
-      name,
-      ahead,
-      behind,
-      last_commit_date: dateStr,
-      last_commit_author: author ?? "",
-      merged,
-      stale,
-    });
+  const staleDays = boundedInteger(opts.staleDays, 30, 0, 36500);
+  const remoteName = opts.remoteName ?? "origin";
+  const main = opts.base ?? await defaultBranch(opts.cwd, remoteName);
+  const refPrefix = opts.remote ? `refs/remotes/${remoteName}/` : "refs/heads/";
+  const baseRef = opts.remote ? `${remoteName}/${main}` : main;
+  let base: string;
+  try {
+    base = await resolveRevision(baseRef, opts.cwd);
+  } catch (error) {
+    if (opts.remote || opts.base) throw error;
+    base = await resolveRevision(`${remoteName}/${main}`, opts.cwd);
   }
-
-  return branches.sort((a, b) => (a.last_commit_date > b.last_commit_date ? -1 : 1));
+  const merged = new Set((await git(["for-each-ref", `--merged=${base}`, "--format=%(refname:short)", refPrefix], opts.cwd)).trim().split("\n"));
+  const out = await git(["for-each-ref", "--format=%(refname:short)%00%(committerdate:iso8601)%00%(authorname)", refPrefix], opts.cwd);
+  const branches: BranchInfo[] = [];
+  for (const line of out.split("\n").filter(Boolean)) {
+    const [name, dateStr, author] = line.split("\0");
+    if (name === main || name === `${remoteName}/${main}` || name === `${remoteName}/HEAD`) continue;
+    const counts = await git(["rev-list", "--left-right", "--count", `${base}...${name}`], opts.cwd);
+    const [behind, ahead] = counts.trim().split(/\s+/).map(Number);
+    const last = new Date(dateStr).getTime();
+    branches.push({ name, ahead, behind, last_commit_date: dateStr, last_commit_author: author, merged: merged.has(name), stale: Number.isFinite(last) && Date.now() - last > staleDays * 86400000 });
+  }
+  return branches.sort((a, b) => b.last_commit_date.localeCompare(a.last_commit_date));
 }

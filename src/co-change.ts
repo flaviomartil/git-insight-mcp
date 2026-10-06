@@ -1,4 +1,4 @@
-import { git } from "./git.js";
+import { git, boundedInteger, repoFile } from "./git.js";
 import type { CoChangeResult, CoChangeEntry } from "./types.js";
 
 export async function coChange(opts: {
@@ -8,37 +8,26 @@ export async function coChange(opts: {
   threshold?: number;
   limit?: number;
 }): Promise<CoChangeResult> {
-  const window = opts.window ?? 1000;
-  const threshold = opts.threshold ?? 3;
-  const limit = opts.limit ?? 20;
-
-  // List recent commits that touched the file (last `window`)
-  const shaList = (
-    await git(["log", `-n`, String(window), "--pretty=format:%H", "--", opts.file], opts.cwd)
-  )
-    .split("\n")
-    .filter(Boolean);
-
-  if (!shaList.length) {
-    return { file: opts.file, total_commits_touching: 0, co_changed: [] };
-  }
-
+  const window = boundedInteger(opts.window, 1000, 1, 5000);
+  const threshold = boundedInteger(opts.threshold, 3, 1, 5000);
+  const limit = boundedInteger(opts.limit, 20, 1, 1000);
+  const file = await repoFile(opts.file, opts.cwd);
+  const output = await git(["log", "-n", String(window), "--format=%x00%x00%x00%H", "--name-only", "-z", "--full-diff", "--diff-merges=dense-combined", "--no-renames", "--", file], opts.cwd);
+  const commits = output.split(/\0{3,}/).filter(Boolean);
   const counts = new Map<string, number>();
-  for (const sha of shaList) {
-    const filesOut = await git(["show", "--name-only", "--pretty=format:", sha], opts.cwd);
-    const files = filesOut.split("\n").map((s) => s.trim()).filter(Boolean);
-    for (const f of files) {
-      if (f === opts.file) continue;
-      counts.set(f, (counts.get(f) ?? 0) + 1);
+  for (const commit of commits) {
+    const separator = commit.indexOf("\0");
+    if (separator < 0) continue;
+    const paths = commit.slice(separator + 1).replace(/^\n/, "").split("\0").filter(Boolean);
+    for (const path of new Set(paths)) {
+      if (path !== file) counts.set(path, (counts.get(path) ?? 0) + 1);
     }
   }
-
-  const total = shaList.length;
+  const total = commits.length;
   const entries: CoChangeEntry[] = Array.from(counts.entries())
-    .filter(([, n]) => n >= threshold)
-    .map(([file, n]) => ({ file, together: n, ratio: +(n / total).toFixed(3) }))
-    .sort((a, b) => b.together - a.together)
+    .filter(([, count]) => count >= threshold)
+    .map(([file, count]) => ({ file, count, ratio: +(count / total).toFixed(3) }))
+    .sort((a, b) => b.count - a.count || a.file.localeCompare(b.file))
     .slice(0, limit);
-
-  return { file: opts.file, total_commits_touching: total, co_changed: entries };
+  return { file, total_commits_touching: total, co_changed: entries };
 }

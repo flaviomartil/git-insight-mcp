@@ -4,9 +4,7 @@
 
 # git-insight-mcp
 
-[![git-insight-mcp MCP server](https://glama.ai/mcp/servers/HasanJahidul/git-insight-mcp/badges/score.svg)](https://glama.ai/mcp/servers/HasanJahidul/git-insight-mcp)
-[![CI](https://github.com/HasanJahidul/git-insight-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/HasanJahidul/git-insight-mcp/actions/workflows/ci.yml)
-[![npm version](https://img.shields.io/npm/v/git-insight-mcp.svg)](https://www.npmjs.com/package/git-insight-mcp)
+[![CI](https://github.com/flaviomartil/git-insight-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/flaviomartil/git-insight-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Semantic git queries via MCP. Beyond `git log` — answer who/what/when/why about any line, file, or branch.
@@ -29,8 +27,12 @@ LLM agents need this context to make safe edits. Currently they `git log -n 5` a
 
 ## Install
 
+This maintained harness fork is [flaviomartil/git-insight-mcp](https://github.com/flaviomartil/git-insight-mcp), version `0.1.3-harness.1`, based on [HasanJahidul/git-insight-mcp](https://github.com/HasanJahidul/git-insight-mcp) commit `b584c723df75053aebe9c4a769daf9b1719e87a1`. The public npm release does not include these corrections. Build this checkout and use its CLI through the harness launcher. Run it on demand; no global MCP registration is needed.
+
 ```bash
-npm install -g git-insight-mcp
+npm ci --ignore-scripts
+npm run build
+npm test
 ```
 
 Wire into Claude Code:
@@ -47,14 +49,14 @@ For PR / issue lookups, set a GitHub token:
 export GH_TOKEN=ghp_...
 ```
 
-Without a token, the local-git tools still work. PR linkage is skipped.
+Without a token, local tools and PR references in commit messages still work. GitHub enrichment also uses existing `gh` authentication. Message references produce local links for GitHub, Bitbucket and Azure DevOps; they do not verify merge state or reviewers. Use `--remote-name` to select the provider in a repository with mirrors.
 
 ## Tools
 
 | Tool | Purpose |
 |------|---------|
 | `who_touched` | Group blame by author. Lines, commits, last-touched, primary owner. Optional line-range narrowing. |
-| `introducing_pr` | Find the PR that introduced a line (or commit). Parses merge messages first; falls back to GitHub API. |
+| `introducing_pr` | Find the PR associated with a commit or the last change to a line. Parses messages first; falls back to GitHub API. |
 | `co_change` | Files most often changed together with the input file. |
 | `branch_hygiene` | List branches with ahead/behind, last commit, merged status, stale flag. |
 | `recent_work` | Standup helper: author's commits + files + ins/del in a window. |
@@ -79,7 +81,9 @@ Without a token, the local-git tools still work. PR linkage is skipped.
 ```bash
 git-insight-mcp who-touched src/auth.ts
 git-insight-mcp co-change src/auth.ts
+git-insight-mcp co-change src/auth.ts --cwd /path/to/repo --window 200 --threshold 3 --limit 10 --compact
 git-insight-mcp branches
+git-insight-mcp branches --remote --remote-name italents --base main
 git-insight-mcp recent alice
 git-insight-mcp commit a3e577e
 git-insight-mcp intro-pr src/auth.ts:42
@@ -90,17 +94,21 @@ git-insight-mcp                # MCP stdio server
 ## Build from source
 
 ```bash
-git clone https://github.com/HasanJahidul/git-insight-mcp.git
+git clone https://github.com/flaviomartil/git-insight-mcp.git
 cd git-insight-mcp
-npm install
+npm ci --ignore-scripts
 npm run build
 node dist/cli.js branches
 ```
 
-## Limits (v0.1)
+## Local corrections and limits
 
-- GitHub only (no GitLab/Bitbucket yet).
-- `co_change` is O(window × files-per-commit) — defaults capped at 1000 commits.
+- GitHub API enrichment; local message links also support Bitbucket and Azure DevOps. Other providers use existing harness tools for API metadata.
+- `co_change` uses one batched history query, defaults to 1000 commits and rejects windows above 5000. It returns `count`; correlation does not establish dependency.
+- `commit_context.files_changed` contains objects with `path`, `insertions` and `deletions`. `recent_work` includes per-commit statistics and totals for the same limited commit window.
+- Remote branch merge checks inspect remote refs, support a selected remote and reject an unresolved base instead of fabricating zero counts.
+- Numeric inputs and blame ranges are validated. SQLite dependencies reserved for future work have been removed.
+- The lockfile includes patched transitive dependencies for the advisories found during adaptation; verify it with `npm audit --omit=dev`.
 - Function-level blame is by line range, not AST. Renames not yet tracked.
 - GH API rate limit applies (5000/h authed). PR results uncached this version.
 

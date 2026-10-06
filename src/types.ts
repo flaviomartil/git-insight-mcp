@@ -35,7 +35,7 @@ export interface IntroducingPRResult {
 
 export interface CoChangeEntry {
   file: string;
-  together: number;
+  count: number;
   ratio: number;
 }
 
@@ -66,8 +66,17 @@ export interface RecentWorkResult {
     sha: string;
     date: string;
     subject: string;
+    files: number;
+    insertions: number;
+    deletions: number;
     pr?: number;
   }>;
+}
+
+export interface FileStat {
+  path: string;
+  insertions: number;
+  deletions: number;
 }
 
 export interface CommitContextResult {
@@ -77,7 +86,7 @@ export interface CommitContextResult {
   date: string;
   subject: string;
   body: string;
-  files_changed: string[];
+  files_changed: FileStat[];
   insertions: number;
   deletions: number;
   pr: PRRef | null;
