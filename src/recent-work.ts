@@ -9,9 +9,11 @@ export async function recentWork(opts: {
   limit?: number;
 }): Promise<RecentWorkResult> {
   const since = opts.since ?? "7 days ago";
+  if (since.startsWith("-")) throw new Error("Invalid since value");
   const limit = boundedInteger(opts.limit, 100, 1, 1000);
   const author = opts.author ?? (await git(["config", "user.name"], opts.cwd)).trim();
   if (!author) throw new Error("Provide author or configure git user.name");
+  if (author.startsWith("-")) throw new Error("Invalid author value");
   const output = await git(["log", `--author=${author}`, `--since=${since}`, "-n", String(limit), "--format=%x00%x00%x00%H%x00%aI%x00%s", "--numstat", "-z"], opts.cwd);
   const filesSet = new Set<string>();
   const commits = output.split(/\0{3,}/).filter(Boolean).map((record) => {

@@ -62,8 +62,9 @@ async function main() {
     case "intro-pr": {
       if (!arg) throw new Error("usage: git-insight-mcp intro-pr <revision|file:line>");
       const colon = arg.lastIndexOf(":");
-      result = await introducingPR(colon >= 0
-        ? { cwd, file: arg.slice(0, colon), line: Number(arg.slice(colon + 1)), remoteName }
+      const suffix = colon > 0 ? arg.slice(colon + 1) : "";
+      result = await introducingPR(/^\d+$/.test(suffix) && Number(suffix) > 0
+        ? { cwd, file: arg.slice(0, colon), line: Number(suffix), remoteName }
         : { cwd, commit: arg, remoteName });
       break;
     }

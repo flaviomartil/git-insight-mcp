@@ -58,14 +58,19 @@ async function findRemote(cwd: string, remoteName?: string): Promise<ParsedRemot
   if (remoteName && !names.includes(remoteName)) throw new Error("Unknown remote");
   const ordered = remoteName ? [remoteName] : [...names].sort((a, b) => Number(b === "origin") - Number(a === "origin"));
   for (const name of ordered) {
-    let url = (await git(["remote", "get-url", name], cwd)).trim();
+    let url = (await git(["config", "--get", `remote.${name}.url`], cwd).catch(() => git(["remote", "get-url", name], cwd))).trim();
     const sshHost = url.match(/^[^@/]+@([^:]+):/)?.[1] ?? (url.startsWith("ssh://") ? new URL(url).hostname : undefined);
     if (sshHost && !["github.com", "bitbucket.org", "ssh.dev.azure.com"].includes(sshHost)) {
-      try {
-        const { stdout } = await exec("ssh", ["-G", "--", sshHost], { timeout: 3000, maxBuffer: 256 * 1024 });
-        const host = stdout.match(/^hostname (.+)$/m)?.[1];
-        if (host) url = url.replace(sshHost, host);
-      } catch {}
+      if (/github/i.test(sshHost)) url = url.replace(sshHost, "github.com");
+      else if (/bitbucket/i.test(sshHost)) url = url.replace(sshHost, "bitbucket.org");
+      else if (/azure/i.test(sshHost)) url = url.replace(sshHost, "ssh.dev.azure.com");
+      else if (process.env.GIT_INSIGHT_ONLINE === "1") {
+        try {
+          const { stdout } = await exec("ssh", ["-G", "--", sshHost], { timeout: 3000, maxBuffer: 256 * 1024 });
+          const host = stdout.match(/^hostname (.+)$/m)?.[1];
+          if (host) url = url.replace(sshHost, host);
+        } catch {}
+      }
     }
     const parsed = parseRemoteUrl(url);
     if (!parsed) continue;
@@ -91,7 +96,9 @@ export async function lookupPR(opts: { cwd: string; sha: string; message: string
     const url = localPRUrl(remote, number);
     if (url) return { pr: { number, url, title: opts.message.split("\n")[0], author: "", merged_at: null, reviewers: [] }, source: "merge-commit-parse" };
   }
-  const pr = remote.host === "github.com" ? await fetchPRForCommit({ owner: remote.owner, repo: remote.repo, commitSha: opts.sha }) : null;
+  const pr = process.env.GIT_INSIGHT_ONLINE === "1" && remote.host === "github.com"
+    ? await fetchPRForCommit({ owner: remote.owner, repo: remote.repo, commitSha: opts.sha })
+    : null;
   return { pr, source: pr ? "github-api" : "not-found" };
 }
 

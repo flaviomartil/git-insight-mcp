@@ -48,7 +48,7 @@ export async function defaultBranch(cwd: string, remoteName = "origin"): Promise
     for (const cand of ["main", "master", "develop"]) {
       if (branches.includes(cand) || branches.includes(`${remoteName}/${cand}`)) return cand;
     }
-    throw new Error("Cannot resolve the default branch; provide base explicitly");
+    return "HEAD";
   }
 }
 

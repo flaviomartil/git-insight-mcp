@@ -53,6 +53,8 @@ const TOOLS = [
       type: "object",
       properties: {
         file: { type: "string" },
+        function: { type: "string" },
+        line_range: { type: "string" },
         total_lines: { type: "number" },
         authors: {
           type: "array",
@@ -217,6 +219,7 @@ const TOOLS = [
               sha: { type: "string" },
               subject: { type: "string" },
               date: { type: "string" },
+              pr: { type: "number" },
               files: { type: "number" },
               insertions: { type: "number" },
               deletions: { type: "number" },
@@ -247,6 +250,7 @@ const TOOLS = [
       type: "object",
       properties: {
         sha: { type: "string" },
+        short_sha: { type: "string" },
         subject: { type: "string" },
         body: { type: "string" },
         author: { type: "string" },
